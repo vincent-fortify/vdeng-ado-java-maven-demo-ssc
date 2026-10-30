@@ -1,9 +1,19 @@
 trigger: none
 pool:
   name: homelab-linux
+variables:
+  SSC_URL: https://ssc.vincentdeng.net
+  SSC_APPVERSION: vdeng-ado-java-maven-demo-ssc:main
 steps:
   - script: |
       java -version
       mvn -version
       curl -sI https://ssc.vincentdeng.net | head -1
     displayName: Verify agent
+  - script: |
+      curl -fsSL https://github.com/fortify/fcli/releases/download/v3/fcli-linux.tgz | tar -xz -C "$(Agent.TempDirectory)"
+      "$(Agent.TempDirectory)/fcli" ssc action run ci
+    displayName: Fortify SAST scan (SSC)
+    env:
+      SSC_TOKEN: $(SSC_TOKEN)
+      SC_SAST_TOKEN: $(SC_SAST_TOKEN)
