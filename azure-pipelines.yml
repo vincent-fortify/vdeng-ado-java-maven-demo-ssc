@@ -1,0 +1,9 @@
+trigger: none
+pool:
+  name: homelab-linux
+steps:
+  - script: |
+      java -version
+      mvn -version
+      curl -sI https://ssc.vincentdeng.net | head -1
+    displayName: Verify agent
