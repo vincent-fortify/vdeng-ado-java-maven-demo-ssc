@@ -60,9 +60,9 @@ steps:
 
   # npx needs Node; the agent VM only has JDK 17, Maven and Git
   - task: UseNode@1
-    displayName: Use Node 20
+    displayName: Use Node 22
     inputs:
-      version: 20.x
+      version: 22.x                         # Node LTS (20 reached end of life Apr 2026)
 
   - task: Cache@2
     displayName: Maven cache
@@ -105,8 +105,13 @@ steps:
       DO_CHECK_POLICY: "true"                 # Fail the build if the SSC policy is violated
       # SSC has no Azure DevOps export action, so ask for the generic SARIF report
       SAST_EXPORT_ACTION: sarif-sast-report
-      SAST_EXPORT_EXTRA_OPTS: --file=$(Build.ArtifactStagingDirectory)/sarif/fortify-sast.sarif
-      APPVERSION_SUMMARY_EXTRA_OPTS: --file=$(Agent.TempDirectory)/fortify-summary.md
+      # --workspace-dir makes SARIF paths repo-relative so Scans tab findings link to the right file
+      SAST_EXPORT_EXTRA_OPTS: --file=$(Build.ArtifactStagingDirectory)/sarif/fortify-sast.sarif --workspace-dir=$(Build.SourcesDirectory)
+      # Summary shows only the default filter set (Security Auditor View)
+      APPVERSION_SUMMARY_EXTRA_OPTS: --file=$(Agent.TempDirectory)/fortify-summary.md --filtersets=default
+      # To also show Quick View (Critical/High only), use this line instead
+      # (GUID used because the name has a space; 32142c2d... = Quick View in this SSC):
+      # APPVERSION_SUMMARY_EXTRA_OPTS: --file=$(Agent.TempDirectory)/fortify-summary.md --filtersets=default,32142c2d-3f7f-4863-a1bf-9b1e2f34d2ed
       # Uncomment to force off for a demo:
       # DO_AVIATOR_AUDIT: "false"
 
