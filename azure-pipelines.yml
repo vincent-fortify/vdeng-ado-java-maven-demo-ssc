@@ -24,8 +24,6 @@
 #     SSC_TOKEN       secret  SSC CIToken (unified login token)
 #     SC_SAST_TOKEN   secret  ScanCentral SAST client auth token
 #     AVIATOR_URL / AVIATOR_TOKEN   optional, set both and Aviator audit runs
-#   Environment: `demo` (created automatically on the first Deploy run; add
-#     an approval check there to show a manual release gate)
 #   Extension: "SARIF SAST Scans Tab" (sariftools.scans) for the Scans tab
 #   Permission: Project Build Service needs "Contribute to pull requests" on
 #     the repo, otherwise the PR comment step gets a 403 (the build still passes)
@@ -193,16 +191,16 @@ stages:
     dependsOn: Security
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'), ne(variables['Build.Reason'], 'PullRequest'))
     jobs:
-      - deployment: Demo
+      # Plain job for now. To add a manual approval gate later, turn this into a
+      # `deployment:` job with `environment: demo` (create the environment first
+      # in Pipelines > Environments, then add Approvals and checks there).
+      - job: Demo
         displayName: Deploy to demo
-        environment: demo
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - download: current
-                  artifact: app
-                - script: |
-                    ls -l "$(Pipeline.Workspace)/app"
-                    echo "Deploy would happen here (demo placeholder)"
-                  displayName: Deploy (placeholder)
+        steps:
+          - checkout: none
+          - download: current
+            artifact: app
+          - script: |
+              ls -l "$(Pipeline.Workspace)/app"
+              echo "Deploy would happen here (demo placeholder)"
+            displayName: Deploy (placeholder)
