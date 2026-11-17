@@ -133,7 +133,7 @@ stages:
             displayName: Resolve SSC app version
 
           # Package with ScanCentral Client, submit to the Controller, wait, publish to
-          # SSC, check policy, write the summary and a SARIF report.
+          # SSC, check policy and write a SARIF report.
           - bash: |
               set -uo pipefail
               npx --yes @fortify/setup@"$FORTIFY_SETUP_VERSION" env init --tools=fcli:bootstrapped
@@ -149,13 +149,52 @@ stages:
               SAST_EXPORT_ACTION: sarif-sast-report
               # --workspace-dir makes SARIF paths repo-relative so Scans tab findings link to the right file
               SAST_EXPORT_EXTRA_OPTS: --file=$(Build.ArtifactStagingDirectory)/sarif/fortify-sast.sarif --workspace-dir=$(Build.SourcesDirectory)
-              # Summary shows only the default filter set (Security Auditor View)
-              APPVERSION_SUMMARY_EXTRA_OPTS: --file=$(Agent.TempDirectory)/fortify-summary.md --filtersets=default
-              # To also show Quick View (Critical/High only), use this line instead
-              # (GUID used because the name has a space; 32142c2d... = Quick View in this SSC):
-              # APPVERSION_SUMMARY_EXTRA_OPTS: --file=$(Agent.TempDirectory)/fortify-summary.md --filtersets=default,32142c2d-3f7f-4863-a1bf-9b1e2f34d2ed
+              # fcli's built-in summary is replaced by ci/fortify_summary.py (next step)
+              DO_APPVERSION_SUMMARY: "false"
               # Uncomment to force off for a demo:
               # DO_AVIATOR_AUDIT: "false"
+
+          # Build the Fortify summary from SSC: severity counts, New / Re-introduced /
+          # Fixed compared with the previous scan (PRs: compared with master), issue
+          # lists with links to the source and to SSC, and the policy result.
+          # Runs even if the Fortify step failed on the policy check.
+          - bash: |
+              set -uo pipefail
+              # Re-init is quick (fcli is already in the tool cache) and doesn't rely on the previous step
+              npx --yes @fortify/setup@"$FORTIFY_SETUP_VERSION" env init --tools=fcli:bootstrapped > /dev/null
+              source <(npx --yes @fortify/setup@"$FORTIFY_SETUP_VERSION" env shell) || true
+              FCLI="${FCLI_CMD:-fcli}"
+              WORK="$(Agent.TempDirectory)/fortify-summary-data"
+              mkdir -p "$WORK"
+              if [ -z "${SSC_APPVERSION:-}" ]; then echo "SSC_APPVERSION not set, skipping summary"; exit 0; fi
+              # Pre-generated token: logout never revokes it
+              if ! "$FCLI" ssc session login --url "$SSC_URL" --token "$SSC_TOKEN" --session summary > /dev/null; then
+                echo "##vso[task.logissue type=warning]SSC login failed, no Fortify summary"; exit 0
+              fi
+              if "$FCLI" ssc appversion get "$SSC_APPVERSION" --session summary -o json > "$WORK/appversion.json" \
+                 && "$FCLI" ssc issue list --av "$SSC_APPVERSION" --include=visible,removed --session summary -o json > "$WORK/issues.json"; then
+                "$FCLI" ssc action run check-policy --av "$SSC_APPVERSION" --ssc-session summary > /dev/null 2>&1
+                RC=$?; POLICY=unknown
+                [ "$RC" -eq 0 ] && POLICY=pass
+                [ "$RC" -eq 100 ] && POLICY=fail
+                PR_FLAG=""; [ "$(IS_PR)" = "True" ] && PR_FLAG="--pr"
+                python3 -I ci/fortify_summary.py \
+                  --appversion-json "$WORK/appversion.json" --issues-json "$WORK/issues.json" \
+                  --ssc-url "$SSC_URL" --app "${SSC_APPVERSION%%:*}" --version "${SSC_APPVERSION#*:}" \
+                  --policy "$POLICY" $PR_FLAG \
+                  --repo-url "$(System.CollectionUri)$(System.TeamProject)/_git/$(Build.Repository.Name)" \
+                  --branch "${SSC_APPVERSION#*:}" \
+                  --build-url "$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)" \
+                  --out "$(Agent.TempDirectory)/fortify-summary.md" \
+                  || echo "##vso[task.logissue type=warning]Building the Fortify summary failed"
+              else
+                echo "##vso[task.logissue type=warning]Could not read SSC data, no Fortify summary"
+              fi
+              "$FCLI" ssc session logout --session summary > /dev/null 2>&1 || true
+            displayName: Build Fortify summary
+            condition: always()
+            env:
+              SSC_TOKEN: $(SSC_TOKEN)
 
           # The SARIF SAST Scans Tab extension reads the artifact named CodeAnalysisLogs
           - task: PublishBuildArtifacts@1
