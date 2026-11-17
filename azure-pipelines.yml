@@ -1,19 +1,138 @@
-trigger: none
+# =============================================================================
+# Fortify SSC + ScanCentral SAST in Azure DevOps
+# (demo pipeline, homelab SSC at https://ssc.vincentdeng.net)
+#
+# Integration: Fortify's fcli script method for ADO
+#   https://fortify.github.io/fcli/v3/ci/ado/script/ast-workflow-ssc.html
+#
+# What this pipeline shows:
+#   - Every PR into master: ScanCentral SAST scan, results published to SSC in
+#     a PR app version seeded from master (so the PR shows only what's new), a
+#     Fortify summary comment on the PR, and the findings in the build's
+#     Scans tab (SARIF)
+#   - Every merge to master: scan, policy check, Scans tab, build summary
+#
+# Azure Repos does NOT use the YAML `pr:` trigger. PR builds come from a
+# Build Validation branch policy on master pointing at this pipeline.
+#
+# One-off setup:
+#   Pipeline variables (pipeline > Edit > Variables):
+#     SSC_TOKEN       secret  SSC CIToken (unified login token)
+#     SC_SAST_TOKEN   secret  ScanCentral SAST client auth token
+#     AVIATOR_URL / AVIATOR_TOKEN   optional, set both and Aviator audit runs
+#   Extension: "SARIF SAST Scans Tab" (sariftools.scans) for the Scans tab
+#   Permission: Project Build Service needs "Contribute to pull requests" on
+#     the repo, otherwise the PR comment step gets a 403 (the build still passes)
+#
+# Agent: self-hosted pool `homelab-linux` (ado-agent-linux, VM 701). It sits
+# on the LAN next to SSC and the ScanCentral Controller, and avoids the
+# 1,800-minute hosted cap on private projects.
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - master
+
+pr: none   # Ignored by Azure Repos anyway; PR builds come from branch policy
+
 pool:
   name: homelab-linux
+
 variables:
-  SSC_URL: https://ssc.vincentdeng.net
-  SSC_APPVERSION: vdeng-ado-java-maven-demo-ssc:main
+  # SSC_TOKEN and SC_SAST_TOKEN are secret pipeline variables (pipeline > Edit > Variables)
+  - name: SSC_URL
+    value: https://ssc.vincentdeng.net      # Plain text, never secret. Root context, no /ssc
+  - name: FORTIFY_SETUP_VERSION
+    value: v2                               # @fortify/setup npm package (needs >= 2.1.2)
+  - name: FCLI_BOOTSTRAP_VERSION
+    value: v3.29.1                          # Pinned so a new fcli release can't break a demo
+  - name: SSC_APP
+    value: $(Build.Repository.Name)         # One SSC application per repo
+  - name: MAVEN_OPTS
+    value: -Dmaven.repo.local=$(Pipeline.Workspace)/.m2/repository
+  - name: IS_PR
+    value: ${{ eq(variables['Build.Reason'], 'PullRequest') }}
+
 steps:
-  - script: |
-      java -version
-      mvn -version
-      curl -sI https://ssc.vincentdeng.net | head -1
-    displayName: Verify agent
-  - script: |
-      curl -fsSL https://github.com/fortify/fcli/releases/download/v3/fcli-linux.tgz | tar -xz -C "$(Agent.TempDirectory)"
-      "$(Agent.TempDirectory)/fcli" ssc action run ci
-    displayName: Fortify SAST scan (SSC)
+  - checkout: self
+    fetchDepth: 1
+
+  # npx needs Node; the agent VM only has JDK 17, Maven and Git
+  - task: UseNode@1
+    displayName: Use Node 20
+    inputs:
+      version: 20.x
+
+  - task: Cache@2
+    displayName: Maven cache
+    inputs:
+      key: maven | "$(Agent.OS)" | pom.xml
+      restoreKeys: maven | "$(Agent.OS)"
+      path: $(Pipeline.Workspace)/.m2/repository
+
+  # Build the app (makes the pipeline look like a real CI flow)
+  - script: mvn --batch-mode --no-transfer-progress package -DskipTests
+    displayName: Build (Maven)
+
+  # SSC app version: <repo>:<branch>. For PRs the version is named after the
+  # source branch and seeded from master, so the PR shows only what's new.
+  - bash: |
+      set -euo pipefail
+      if [ "$(IS_PR)" = "True" ]; then
+        BRANCH="$(System.PullRequest.SourceBranch)"
+        BRANCH="${BRANCH#refs/heads/}"
+        echo "##vso[task.setvariable variable=SETUP_EXTRA_OPTS]--copy-from $(SSC_APP):master"
+      else
+        BRANCH="$(Build.SourceBranchName)"
+      fi
+      echo "SSC app version: $(SSC_APP):$BRANCH"
+      echo "##vso[task.setvariable variable=SSC_APPVERSION]$(SSC_APP):$BRANCH"
+    displayName: Resolve SSC app version
+
+  # Package with ScanCentral Client, submit to the Controller, wait, publish to
+  # SSC, check policy, write the summary and a SARIF report.
+  - bash: |
+      set -uo pipefail
+      npx --yes @fortify/setup@"$FORTIFY_SETUP_VERSION" env init --tools=fcli:bootstrapped
+      source <(npx --yes @fortify/setup@"$FORTIFY_SETUP_VERSION" env shell)
+      "${FCLI_CMD:-fcli}" action run ci
+    displayName: Fortify SAST (ScanCentral + SSC)
     env:
-      SSC_TOKEN: $(SSC_TOKEN)
+      SSC_TOKEN: $(SSC_TOKEN)                 # Secrets must be mapped explicitly
       SC_SAST_TOKEN: $(SC_SAST_TOKEN)
+      # AVIATOR_TOKEN: $(AVIATOR_TOKEN)      # Uncomment once AVIATOR_URL/AVIATOR_TOKEN are set as pipeline variables
+      DO_CHECK_POLICY: "true"                 # Fail the build if the SSC policy is violated
+      # SSC has no Azure DevOps export action, so ask for the generic SARIF report
+      SAST_EXPORT_ACTION: sarif-sast-report
+      SAST_EXPORT_EXTRA_OPTS: --file=$(Build.ArtifactStagingDirectory)/sarif/fortify-sast.sarif
+      APPVERSION_SUMMARY_EXTRA_OPTS: --file=$(Agent.TempDirectory)/fortify-summary.md
+      # Uncomment to force off for a demo:
+      # DO_AVIATOR_AUDIT: "false"
+
+  # The SARIF SAST Scans Tab extension reads the artifact named CodeAnalysisLogs
+  - task: PublishBuildArtifacts@1
+    displayName: Publish SARIF (Scans tab)
+    condition: always()
+    inputs:
+      PathtoPublish: $(Build.ArtifactStagingDirectory)/sarif
+      ArtifactName: CodeAnalysisLogs
+
+  # Fortify summary on the build's Extensions tab, and as a PR comment on PRs
+  # (SSC has no ado-pr-comment action, so this posts the summary directly)
+  - bash: |
+      set -uo pipefail
+      SUMMARY="$(Agent.TempDirectory)/fortify-summary.md"
+      [ -s "$SUMMARY" ] || { echo "No Fortify summary produced, skipping"; exit 0; }
+      echo "##vso[task.uploadsummary]$SUMMARY"
+      [ "$(IS_PR)" = "True" ] || exit 0
+      BODY=$(python3 -c 'import json,sys; print(json.dumps({"comments":[{"parentCommentId":0,"content":open(sys.argv[1]).read(),"commentType":1}],"status":"closed"}))' "$SUMMARY")
+      URL="$(System.CollectionUri)$(System.TeamProjectId)/_apis/git/repositories/$(Build.Repository.ID)/pullRequests/$(System.PullRequest.PullRequestId)/threads?api-version=7.1"
+      CODE=$(curl -sS -o /tmp/pr-comment.json -w '%{http_code}' -X POST "$URL" \
+        -H "Authorization: Bearer $SYSTEM_ACCESSTOKEN" -H "Content-Type: application/json" -d "$BODY")
+      if [ "$CODE" = "200" ]; then echo "PR comment posted"
+      else echo "##vso[task.logissue type=warning]PR comment failed (HTTP $CODE). Give Project Build Service 'Contribute to pull requests' on the repo."; fi
+    displayName: Fortify summary and PR comment
+    condition: always()
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
