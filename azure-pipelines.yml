@@ -168,11 +168,11 @@ stages:
               mkdir -p "$WORK"
               if [ -z "${SSC_APPVERSION:-}" ]; then echo "SSC_APPVERSION not set, skipping summary"; exit 0; fi
               # Pre-generated token: logout never revokes it
-              if ! "$FCLI" ssc session login --url "$SSC_URL" --token "$SSC_TOKEN" --session summary > /dev/null; then
+              if ! "$FCLI" ssc session login --url "$SSC_URL" --token "$SSC_TOKEN" --ssc-session summary > /dev/null; then
                 echo "##vso[task.logissue type=warning]SSC login failed, no Fortify summary"; exit 0
               fi
-              if "$FCLI" ssc appversion get "$SSC_APPVERSION" --session summary -o json > "$WORK/appversion.json" \
-                 && "$FCLI" ssc issue list --av "$SSC_APPVERSION" --include=visible,removed --session summary -o json > "$WORK/issues.json"; then
+              if "$FCLI" ssc appversion get "$SSC_APPVERSION" --ssc-session summary -o json > "$WORK/appversion.json" \
+                 && "$FCLI" ssc issue list --av "$SSC_APPVERSION" --include=visible,removed --ssc-session summary -o json > "$WORK/issues.json"; then
                 "$FCLI" ssc action run check-policy --av "$SSC_APPVERSION" --ssc-session summary > /dev/null 2>&1
                 RC=$?; POLICY=unknown
                 [ "$RC" -eq 0 ] && POLICY=pass
@@ -190,7 +190,7 @@ stages:
               else
                 echo "##vso[task.logissue type=warning]Could not read SSC data, no Fortify summary"
               fi
-              "$FCLI" ssc session logout --session summary > /dev/null 2>&1 || true
+              "$FCLI" ssc session logout --ssc-session summary > /dev/null 2>&1 || true
             displayName: Build Fortify summary
             condition: always()
             env:
